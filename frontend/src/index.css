@@ -1,0 +1,10 @@
+@import "tailwindcss";
+@custom-variant dark (&:is(.dark *));
+
+body {
+  @apply bg-[#FAFAFA] transition-colors duration-300 m-0 p-0 text-slate-900;
+}
+
+:is(.dark) body {
+  @apply bg-slate-950 text-white;
+}
