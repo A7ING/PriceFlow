@@ -96,7 +96,10 @@ async def check_prices():
                                 else msg
                             )
                             await send_email_message(
-                                settings.contact_info, subject, html_msg
+                                settings.contact_info,
+                                subject,
+                                msg,
+                                product.image_url
                             )
 
         except Exception as e:
