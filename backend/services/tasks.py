@@ -50,7 +50,7 @@ async def check_prices():
             print(f"[планувальник] Оновлення ціни для: {product.name[:30]}...")
             parsed_data = await get_product_data(product.url)
             new_price = parsed_data["price"]
-            current_image = parsed_data.get("image_url")
+            current_image = product.image_url or parsed_data.get("image_url")
 
             if new_price and new_price != product.current_price:
                 old_price = product.current_price
