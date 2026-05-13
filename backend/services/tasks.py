@@ -90,11 +90,6 @@ async def check_prices():
                                 settings.contact_info, msg, product.image_url
                             )
                         elif settings.notify_method == "email":
-                            html_msg = (
-                                f"<img src='{product.image_url}' width='200'><br><br>{msg}"
-                                if product.image_url
-                                else msg
-                            )
                             await send_email_message(
                                 settings.contact_info,
                                 subject,
