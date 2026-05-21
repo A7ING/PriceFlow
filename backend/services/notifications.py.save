@@ -4,33 +4,10 @@ from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 import httpx
 
-TELEGRAM_BOT_TOKEN = "8640781340:AAFumIcgm9AKgqFahY9OIWAxjlyqs5ubKI8"
-
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 465
 SENDER_EMAIL = "priceflow.alerts@gmail.com"
 SENDER_PASSWORD = "duauqdukdiqmkibd"
-
-
-async def send_telegram_message(chat_id: str, text: str, image_url: str = None):
-    if not chat_id or not chat_id.isdigit():
-        print("[телеграм] Невірний формат Chat ID.")
-        return False
-
-    async with httpx.AsyncClient() as client:
-        try:
-            if image_url:
-                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-                payload = {"chat_id": chat_id, "photo": image_url, "caption": text, "parse_mode": "HTML"}
-            else:
-                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-            response = await client.post(url, json=payload)
-            print(f"[телеграм] Відповідь: {response.status_code} {response.text}")
-            return response.status_code == 200
-        except Exception as e:
-            print(f"[телеграм] Помилка: {str(e)}")
-            return False
 
 
 async def send_email_message(to_email: str, subject: str, html_content: str, image_url: str = None):
@@ -62,11 +39,13 @@ async def send_email_message(to_email: str, subject: str, html_content: str, ima
                 }
                 async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
                     response = await client.get(image_url, headers=headers)
+
                     content_type = response.headers.get("content-type", "")
                     print(f"[EMAIL] Картинка статус: {response.status_code}, content-type: {content_type}")
 
                     if response.status_code == 200 and "image" in content_type:
                         image_data = response.content
+
                         if "png" in content_type:
                             image_subtype = "png"
                         elif "webp" in content_type:
@@ -75,6 +54,7 @@ async def send_email_message(to_email: str, subject: str, html_content: str, ima
                             image_subtype = "gif"
                         else:
                             image_subtype = "jpeg"
+
                         img_tag = (
                             '<div style="text-align: center; margin-top: 20px;">'
                             '<img src="cid:product_image" alt="Product Image" '
@@ -85,6 +65,7 @@ async def send_email_message(to_email: str, subject: str, html_content: str, ima
                         print(f"[EMAIL] Картинка завантажена успішно ({len(image_data)} байт, {image_subtype})")
                     else:
                         print(f"[EMAIL] Не вдалося отримати картинку: status={response.status_code}, type={content_type}")
+
             except Exception as e:
                 print(f"[EMAIL] Помилка завантаження картинки: {e}")
 
@@ -121,6 +102,4 @@ async def send_email_message(to_email: str, subject: str, html_content: str, ima
         print(f"[EMAIL] Лист успішно відправлено на {to_email}")
         return True
 
-    except Exception as e:
-        print(f"[EMAIL] Помилка відправки: {str(e)}")
-        return False
+    except Exception
