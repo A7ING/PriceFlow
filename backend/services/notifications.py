@@ -1,6 +1,7 @@
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
 import httpx
 
 TELEGRAM_BOT_TOKEN = "8640781340:AAFumIcgm9AKgqFahY9OIWAxjlyqs5ubKI8"
@@ -11,51 +12,30 @@ SENDER_EMAIL = "priceflow.alerts@gmail.com"
 SENDER_PASSWORD = "duauqdukdiqmkibd"
 
 
-async def send_telegram_message(chat_id: str, text: str, image_url: str = None):
-    if not chat_id or not chat_id.isdigit():
-        print("[телеграм] Невірний формат Chat ID.")
-        return False
-
-    async with httpx.AsyncClient() as client:
-        try:
-            if image_url:
-                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-                payload = {
-                    "chat_id": chat_id,
-                    "photo": image_url,
-                    "caption": text,
-                    "parse_mode": "HTML",
-                }
-            else:
-                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-
-            response = await client.post(url, json=payload)
-            if response.status_code == 200:
-                print(f"[телеграм] Повідомлення відправлено на {chat_id}")
-                return True
-            else:
-                print(f"[телеграм] Помилка API: {response.text}")
-                return False
-        except Exception as e:
-            print(f"[телеграм] Помилка: {str(e)}")
-            return False
-
-
 async def send_email_message(to_email: str, subject: str, html_content: str, image_url: str = None):
     if not to_email or "@" not in to_email:
         print("[EMAIL] Невірний формат пошти.")
         return False
 
     try:
-        msg = MIMEMultipart()
+        msg = MIMEMultipart('related')
         msg["From"] = f"PriceFlow Alerts <{SENDER_EMAIL}>"
         msg["To"] = to_email
         msg["Subject"] = subject
 
         formatted_body = html_content.replace("\n", "<br>")
+        img_tag = ""
+        image_data = None
 
-        img_tag = f'<div style="text-align: center; margin-top: 20px;"><img src="{image_url}" alt="Product Image" style="max-width: 300px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"></div>' if image_url else ""
+        if image_url:
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(image_url)
+                    if response.status_code == 200:
+                        image_data = response.content
+                        img_tag = f'<div style="text-align: center; margin-top: 20px;"><img src="cid:product_image" alt="Product Image" style="max-width: 300px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"></div>'
+            except Exception as e:
+                print(f"[EMAIL] Не вдалося завантажити картинку для листа: {e}")
 
         full_html = f"""
         <html>
@@ -70,7 +50,15 @@ async def send_email_message(to_email: str, subject: str, html_content: str, ima
         </html>
         """
 
-        msg.attach(MIMEText(full_html, "html"))
+        msg_alternative = MIMEMultipart('alternative')
+        msg.attach(msg_alternative)
+        msg_alternative.attach(MIMEText(full_html, "html"))
+
+        if image_data:
+            image = MIMEImage(image_data)
+            image.add_header('Content-ID', '<product_image>')
+            image.add_header('Content-Disposition', 'inline', filename='product.jpg')
+            msg.attach(image)
 
         server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
         server.login(SENDER_EMAIL, SENDER_PASSWORD)
