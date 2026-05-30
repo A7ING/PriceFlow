@@ -98,19 +98,30 @@ async def _extract_product_info(page, domain):
     if not raw_price:
         raw_price = await extract_price_from_dom(page)
 
-    h1 = await page.query_selector("h1")
-    if h1:
-        product_name = await h1.inner_text()
-    elif domain in STORE_SELECTORS:
+    if domain in STORE_SELECTORS:
         for sel in STORE_SELECTORS[domain]["name"]:
             try:
                 el = await page.query_selector(sel)
                 if el:
-                    product_name = await el.inner_text()
-                    break
+                    text = await el.inner_text()
+                    if text and text.strip():
+                        product_name = text.strip()
+                        break
             except:
                 continue
-    if not product_name: product_name = "Unknown Product"
+
+    if not product_name:
+        try:
+            h1 = await page.query_selector("h1")
+            if h1:
+                text = await h1.inner_text()
+                if text and text.strip():
+                    product_name = text.strip()
+        except:
+            pass
+
+    if not product_name:
+        product_name = "Unknown Product"
 
     product_image = None
     img_selectors = ['meta[property="og:image"]', 'img#globalImage', "img.product-image", 'link[rel="image_src"]']
