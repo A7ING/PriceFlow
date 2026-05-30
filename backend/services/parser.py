@@ -5,6 +5,7 @@ from urllib.parse import quote, urlparse
 from playwright.async_api import async_playwright
 from playwright_stealth import stealth_async
 from camoufox.async_api import AsyncCamoufox
+from browserforge.fingerprints import Screen
 
 MAX_CONCURRENT_PARSERS = asyncio.Semaphore(1)
 
@@ -33,7 +34,6 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-
 def clean_price(raw_price) -> float:
     if raw_price is None: return 0.0
     if isinstance(raw_price, (int, float)): return float(raw_price)
@@ -43,7 +43,6 @@ def clean_price(raw_price) -> float:
         return float(clean_str) if clean_str else 0.0
     except:
         return 0.0
-
 
 async def extract_price_from_dom(page):
     possible_containers = ["main", ".product", ".product-page", ".product-main", ".product-card", "#content", "body"]
@@ -59,7 +58,6 @@ async def extract_price_from_dom(page):
         except:
             continue
     return None
-
 
 async def _extract_product_info(page, domain):
     wait_selector = "h1"
@@ -114,7 +112,6 @@ async def _extract_product_info(page, domain):
                 continue
     if not product_name: product_name = "Unknown Product"
 
-    # IMAGE
     product_image = None
     img_selectors = ['meta[property="og:image"]', 'img#globalImage', "img.product-image", 'link[rel="image_src"]']
     for img_sel in img_selectors:
@@ -145,13 +142,11 @@ async def _extract_product_info(page, domain):
 
     return {"name": product_name.strip(), "price": final_price, "image_url": product_image}
 
-
 async def get_product_data(url: str):
     domain = urlparse(url).netloc.replace("www.", "")
     clean_url = url.split("?")[0]
 
     async with MAX_CONCURRENT_PARSERS:
-
         try:
             print(f"[парсер] Спроба 1 (Playwright): {domain}")
             async with async_playwright() as p:
@@ -177,17 +172,39 @@ async def get_product_data(url: str):
 
         try:
             print(f"[парсер] Спроба 2 (Camoufox): {domain}")
-            async with AsyncCamoufox(headless=True) as browser:
+            async with AsyncCamoufox(
+                headless=True,
+                os=["macos"],
+                screen=Screen(max_width=1920, max_height=1080)
+            ) as browser:
                 page = await browser.new_page()
                 await page.goto(clean_url, wait_until="domcontentloaded", timeout=35000)
 
-                try:
-                    cf_iframe = await page.query_selector("iframe[src*='cloudflare']")
-                    if cf_iframe:
-                        print("[парсер] Виявлено Cloudflare")
-                        await page.wait_for_timeout(8000)
-                except:
-                    pass
+                clicked = False
+                for _ in range(15):
+                    await asyncio.sleep(1)
+                    for frame in page.frames:
+                        if frame.url.startswith('https://challenges.cloudflare.com'):
+                            try:
+                                frame_element = await frame.frame_element()
+                                bounding_box = await frame_element.bounding_box()
+                                if bounding_box:
+                                    coord_x = bounding_box['x']
+                                    coord_y = bounding_box['y']
+                                    width = bounding_box['width']
+                                    height = bounding_box['height']
+
+                                    checkbox_x = coord_x + width / 9
+                                    checkbox_y = coord_y + height / 2
+
+                                    await page.mouse.click(x=checkbox_x, y=checkbox_y)
+                                    print("[парсер] Зроблено фізичний клік по капчі Cloudflare!")
+                                    clicked = True
+                            except:
+                                pass
+                    if clicked:
+                        await asyncio.sleep(4)
+                        break
 
                 data = await _extract_product_info(page, domain)
                 print(f"[парсер] Успіх Camoufox: {data['price']}")
