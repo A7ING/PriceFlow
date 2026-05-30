@@ -98,12 +98,13 @@ async def _extract_product_info(page, domain):
     if not raw_price:
         raw_price = await extract_price_from_dom(page)
 
+    # ПОШУК НАЗВИ (ОНОВЛЕНО)
     if domain in STORE_SELECTORS:
         for sel in STORE_SELECTORS[domain]["name"]:
             try:
                 el = await page.query_selector(sel)
                 if el:
-                    text = await el.inner_text()
+                    text = await el.text_content()
                     if text and text.strip():
                         product_name = text.strip()
                         break
@@ -112,9 +113,19 @@ async def _extract_product_info(page, domain):
 
     if not product_name:
         try:
+            meta_title = await page.query_selector('meta[property="og:title"]')
+            if meta_title:
+                text = await meta_title.get_attribute("content")
+                if text and text.strip():
+                    product_name = text.strip().split('|')[0].split('-')[0].strip()
+        except:
+            pass
+
+    if not product_name:
+        try:
             h1 = await page.query_selector("h1")
             if h1:
-                text = await h1.inner_text()
+                text = await h1.text_content()
                 if text and text.strip():
                     product_name = text.strip()
         except:
@@ -123,6 +134,7 @@ async def _extract_product_info(page, domain):
     if not product_name:
         product_name = "Unknown Product"
 
+    # ПОШУК ЗОБРАЖЕННЯ
     product_image = None
     img_selectors = ['meta[property="og:image"]', 'img#globalImage', "img.product-image", 'link[rel="image_src"]']
     for img_sel in img_selectors:
