@@ -205,7 +205,7 @@ async def force_update_product(
                         )
                     elif settings.notify_method == "email":
                         await send_email_message(
-                            settings.contact_info, "PriceFlow Alert!", message
+                            settings.contact_info, "PriceFlow Alert!", message, product.image_url
                         )
 
             return {"status": "success", "message": f"Price updated: {new_price} UAH"}

@@ -98,6 +98,8 @@ async def extract_price_from_dom(page):
 
 async def get_product_data(url: str):
     domain = urlparse(url).netloc.replace("www.", "")
+    clean_url = url.split("?")[0]
+
     async with MAX_CONCURRENT_PARSERS:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -124,33 +126,27 @@ async def get_product_data(url: str):
             """)
             page = await context.new_page()
             await stealth_async(page)
+
             try:
-                await page.route(
-                    "**/*",
-                    lambda route: (
-                        route.continue_()
-                        if route.request.resource_type
-                        in ["document", "script", "xhr", "fetch", "stylesheet"]
-                        else route.abort()
-                    ),
-                )
                 print(f"[парсер] Завантаження: {domain}")
-                await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                await page.goto(clean_url, wait_until="domcontentloaded", timeout=25000)
+
                 wait_selector = "h1"
                 wait_timeout = 8000
 
                 if domain in STORE_SELECTORS:
                     wait_selector = ", ".join(STORE_SELECTORS[domain]["price"])
                     wait_timeout = 12000
+
                 try:
                     await page.wait_for_selector(wait_selector, timeout=wait_timeout)
                 except:
                     pass
+
                 content = await page.content()
                 product_name = None
                 raw_price = None
 
-                # 1. META PRICE
                 meta_price = re.search(
                     r'property="(?:product|og):price:amount" content="([\d.]+)"',
                     content,
@@ -158,13 +154,11 @@ async def get_product_data(url: str):
                 if meta_price:
                     raw_price = meta_price.group(1)
 
-                # 2. JSON-LD PRICE
                 if not raw_price:
                     json_ld_price = re.search(r'"price":\s?"?([\d.]+)"?', content)
                     if json_ld_price:
                         raw_price = json_ld_price.group(1)
 
-                # 3. STORE SELECTORS
                 if not raw_price and domain in STORE_SELECTORS:
                     rules = STORE_SELECTORS[domain]
                     for sel in rules["price"]:
@@ -178,12 +172,9 @@ async def get_product_data(url: str):
                         except:
                             continue
 
-                # 4. SMART FALLBACK
                 if not raw_price:
                     raw_price = await extract_price_from_dom(page)
 
-
-                # PRODUCT NAME
                 h1 = await page.query_selector("h1")
                 if h1:
                     product_name = await h1.inner_text()
@@ -196,10 +187,10 @@ async def get_product_data(url: str):
                                 break
                         except:
                             continue
+
                 if not product_name:
                     product_name = "Unknown Product"
 
-                # PRODUCT IMAGE
                 product_image = None
                 img_selectors = [
                     'meta[property="og:image"]',
@@ -211,6 +202,7 @@ async def get_product_data(url: str):
                     "img.product-image",
                     'link[rel="image_src"]',
                 ]
+
                 for img_sel in img_selectors:
                     try:
                         img_el = await page.query_selector(img_sel)
@@ -221,18 +213,14 @@ async def get_product_data(url: str):
                         )
                         if tag_name == "meta":
                             product_image = await img_el.get_attribute("content")
-
                         elif tag_name == "link":
                             product_image = await img_el.get_attribute("href")
-
                         else:
                             product_image = await img_el.get_attribute("src")
 
                         if product_image:
-
                             if product_image.startswith("//"):
                                 product_image = "https:" + product_image
-
                             elif product_image.startswith("/"):
                                 product_image = f"https://{domain}{product_image}"
 
@@ -243,12 +231,12 @@ async def get_product_data(url: str):
                     except:
                         continue
 
-                # FINAL PRICE
                 final_price = clean_price(raw_price)
                 if final_price == 0:
                     raise ValueError(
-                        "Price not found " "(possibly CAPTCHA or anti-bot protection)"
+                        "Price not found (possibly CAPTCHA, Out of stock or anti-bot protection)"
                     )
+
                 print(f"[парсер] Успіх: {final_price}")
                 return {
                     "name": product_name.strip(),
