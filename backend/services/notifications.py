@@ -4,10 +4,42 @@ from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 import httpx
 
+TELEGRAM_BOT_TOKEN = "8640781340:AAFumIcgm9AKgqFahY9OIWAxjlyqs5ubKI8"
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 465
 SENDER_EMAIL = "priceflow.alerts@gmail.com"
 SENDER_PASSWORD = "duauqdukdiqmkibd"
+
+
+async def send_telegram_message(chat_id: str, text: str, image_url: str = None):
+    if not chat_id or not chat_id.isdigit():
+        print("[телеграм] Невірний формат Chat ID.")
+        return False
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            if image_url:
+                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+                payload = {
+                    "chat_id": chat_id,
+                    "photo": image_url,
+                    "caption": text,
+                    "parse_mode": "HTML",
+                }
+            else:
+                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+
+            response = await client.post(url, data=payload)
+            if response.status_code == 200:
+                print(f"[телеграм] Повідомлення відправлено на {chat_id}")
+                return True
+            else:
+                print(f"[телеграм] Помилка API: {response.text}")
+                return False
+        except Exception as e:
+            print(f"[телеграм] Помилка: {str(e)}")
+            return False
 
 
 async def send_email_message(to_email: str, subject: str, html_content: str, image_url: str = None):
@@ -24,57 +56,21 @@ async def send_email_message(to_email: str, subject: str, html_content: str, ima
         formatted_body = html_content.replace("\n", "<br>")
         img_tag = ""
         image_data = None
-        image_subtype = "jpeg"
 
         if image_url:
             try:
-                headers = {
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36"
-                    ),
-                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                    "Referer": "https://www.google.com/",
-                }
-                async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
-                    response = await client.get(image_url, headers=headers)
-
-                    content_type = response.headers.get("content-type", "")
-                    print(f"[EMAIL] Картинка статус: {response.status_code}, content-type: {content_type}")
-
-                    if response.status_code == 200 and "image" in content_type:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    response = await client.get(image_url)
+                    if response.status_code == 200:
                         image_data = response.content
-
-                        if "png" in content_type:
-                            image_subtype = "png"
-                        elif "webp" in content_type:
-                            image_subtype = "webp"
-                        elif "gif" in content_type:
-                            image_subtype = "gif"
-                        else:
-                            image_subtype = "jpeg"
-
-                        img_tag = (
-                            '<div style="text-align: center; margin-top: 20px;">'
-                            '<img src="cid:product_image" alt="Product Image" '
-                            'style="max-width: 300px; border-radius: 8px; '
-                            'box-shadow: 0 4px 6px rgba(0,0,0,0.1);">'
-                            '</div>'
-                        )
-                        print(f"[EMAIL] Картинка завантажена успішно ({len(image_data)} байт, {image_subtype})")
-                    else:
-                        print(f"[EMAIL] Не вдалося отримати картинку: status={response.status_code}, type={content_type}")
-
+                        img_tag = f'<div style="text-align: center; margin-top: 20px;"><img src="cid:product_image" alt="Product Image" style="max-width: 300px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"></div>'
             except Exception as e:
-                print(f"[EMAIL] Помилка завантаження картинки: {e}")
+                print(f"[EMAIL] Не вдалося завантажити картинку для листа: {e}")
 
         full_html = f"""
         <html>
             <body style="font-family: sans-serif; color: #333; background-color: #f4f7f6; padding: 20px;">
-                <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff;
-                            border: 1px solid #eee; padding: 25px; border-radius: 12px;
-                            box-shadow: 0 2px 10px rgba(0,0,0,0.05);">
+                <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border: 1px solid #eee; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.05);">
                     <div style="font-size: 16px; line-height: 1.5;">
                         {formatted_body}
                     </div>
@@ -89,9 +85,9 @@ async def send_email_message(to_email: str, subject: str, html_content: str, ima
         msg_alternative.attach(MIMEText(full_html, "html"))
 
         if image_data:
-            image = MIMEImage(image_data, _subtype=image_subtype)
+            image = MIMEImage(image_data)
             image.add_header('Content-ID', '<product_image>')
-            image.add_header('Content-Disposition', 'inline', filename=f'product.{image_subtype}')
+            image.add_header('Content-Disposition', 'inline', filename='product.jpg')
             msg.attach(image)
 
         server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
@@ -101,7 +97,6 @@ async def send_email_message(to_email: str, subject: str, html_content: str, ima
 
         print(f"[EMAIL] Лист успішно відправлено на {to_email}")
         return True
-
     except Exception as e:
         print(f"[EMAIL] Помилка відправки: {str(e)}")
         return False
