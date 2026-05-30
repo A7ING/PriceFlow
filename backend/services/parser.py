@@ -20,10 +20,10 @@ STORE_SELECTORS = {
     },
     "allo.ua": {
         "name": ["h1.p-view__header-title", "h1"],
-        "price": [".v-pb__cur", ".p-trade__price-new .sum", "[data-price-amount]"],
+        "price": [".a-product-price__current-price", ".v-pb__cur", ".p-trade__price-new .sum", "[data-price-amount]"],
     },
     "housebrand.com": {
-        "name": ["h1[data-selen='product-name']", ".product-name", "h1", "h2"],
+        "name": ["h1[data-testid='product-name']", ".product-name", "h1", "h2"],
         "price": ["div[data-selen='product-price']", ".price-promo", ".price-standard"],
     },
 }
@@ -198,7 +198,7 @@ async def get_product_data(url: str):
                                     checkbox_y = coord_y + height / 2
 
                                     await page.mouse.click(x=checkbox_x, y=checkbox_y)
-                                    print("[парсер] Зроблено фізичний клік по капчі Cloudflare!")
+                                    print("[парсер] Зроблено фізичний клік по капчі")
                                     clicked = True
                             except:
                                 pass

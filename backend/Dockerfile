@@ -6,7 +6,11 @@ RUN apt-get update && apt-get install -y \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
 RUN playwright install chromium --with-deps
+
+RUN playwright install-deps firefox
+
 RUN python -m camoufox fetch
 
 COPY . .
