@@ -81,24 +81,30 @@ async def _extract_product_info(page, domain):
     product_name = None
     raw_price = None
 
-    meta_price = re.search(r'property="(?:product|og):price:amount" content="([\d.]+)"', content)
-    if meta_price: raw_price = meta_price.group(1)
-
-    if not raw_price:
-        json_ld_price = re.search(r'"price":\s?"?([\d.]+)"?', content)
-        if json_ld_price: raw_price = json_ld_price.group(1)
-
-    if not raw_price and domain in STORE_SELECTORS:
+    if domain in STORE_SELECTORS:
         for sel in STORE_SELECTORS[domain]["price"]:
             try:
                 el = await page.query_selector(sel)
                 if el:
+                    if domain == "prom.ua":
+                        attr = await el.get_attribute("data-qaprice")
+                        if attr:
+                            raw_price = attr
+                            break
                     text = await el.inner_text()
-                    if text:
-                        raw_price = text
+                    if text and text.strip():
+                        raw_price = text.strip()
                         break
             except:
                 continue
+
+    if not raw_price:
+        meta_price = re.search(r'property="(?:product|og):price:amount" content="([\d.]+)"', content)
+        if meta_price: raw_price = meta_price.group(1)
+
+    if not raw_price:
+        json_ld_price = re.search(r'"price":\s?"?([\d.]+)"?', content)
+        if json_ld_price: raw_price = json_ld_price.group(1)
 
     if not raw_price:
         raw_price = await extract_price_from_dom(page)
