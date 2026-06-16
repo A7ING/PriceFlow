@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { LineChart, Line, YAxis, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts';
 
 export default function ProductsTab({ products, url, setUrl, loading, handleAdd, setItemToDelete }) {
   const [openChartIndex, setOpenChartIndex] = useState(null);
@@ -81,13 +81,21 @@ export default function ProductsTab({ products, url, setUrl, loading, handleAdd,
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 md:gap-8 items-start">
           {products.map((p, index) => (
             <div key={index} className="bg-white dark:bg-slate-900 p-5 md:p-6 rounded-xl md:rounded-2xl shadow border border-slate-100 dark:border-slate-800 transition-colors duration-300 flex flex-col">
-              <div className="h-40 md:h-44 w-full mb-5 md:mb-6 rounded-lg bg-white p-2 border border-slate-100 dark:border-slate-800 flex items-center justify-center transition-colors relative">
+
+              {/*Блок з картинкою тепер є клікабельним посиланням на магазин*/}
+              <a
+                href={p.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Відкрити сторінку товару"
+                className="h-40 md:h-44 w-full mb-5 md:mb-6 rounded-lg bg-white p-2 border border-slate-100 dark:border-slate-800 flex items-center justify-center transition-colors relative hover:border-emerald-400 dark:hover:border-emerald-600 block cursor-pointer group"
+              >
                 {p.image_url ? (
                   <>
                     <img
                       src={p.image_url}
                       alt={p.name}
-                      className="max-h-full max-w-full object-contain mix-blend-multiply"
+                      className="max-h-full max-w-full object-contain mix-blend-multiply transition-transform duration-300 group-hover:scale-105"
                       onError={handleImageError}
                     />
                     <div className="default-icon-wrapper hidden flex-col items-center justify-center absolute inset-0 bg-white dark:bg-slate-900 rounded-lg">
@@ -97,7 +105,7 @@ export default function ProductsTab({ products, url, setUrl, loading, handleAdd,
                 ) : (
                   <DefaultProductIcon />
                 )}
-              </div>
+              </a>
 
               <h3 className="text-sm md:text-[15px] font-semibold text-slate-900 dark:text-white line-clamp-2 mb-3 md:mb-4 h-[40px] md:h-[44px] transition-colors" title={p.name}>{p.name}</h3>
               <div className="flex items-end justify-between gap-4">
@@ -118,11 +126,17 @@ export default function ProductsTab({ products, url, setUrl, loading, handleAdd,
                 <div className="h-28 w-full mt-5 mb-1 animate-in fade-in slide-in-from-top-4 duration-300">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={p.history}>
+                      {/* Додано вісь X для дати та змінено форматування*/}
+                      <XAxis dataKey="checked_at" hide />
                       <YAxis domain={['dataMin', 'dataMax']} hide />
                       <RechartsTooltip
-                        contentStyle={{ backgroundColor: '#1e293b', border: 'none', borderRadius: '8px', color: '#fff', fontSize: '12px', padding: '4px 8px' }}
-                        itemStyle={{ color: '#10b981' }}
-                        labelFormatter={() => ''}
+                        contentStyle={{ backgroundColor: '#1e293b', border: 'none', borderRadius: '8px', color: '#fff', fontSize: '12px', padding: '6px 10px' }}
+                        itemStyle={{ color: '#10b981', fontWeight: 'bold' }}
+                        labelFormatter={(label) => {
+                          if (!label) return '';
+                          const date = new Date(label);
+                          return date.toLocaleDateString() + ', ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                        }}
                         formatter={(value) => [`${value}${getCurrency(p.url)}`, 'Price']}
                       />
                       <Line type="monotone" dataKey="price" stroke="#10b981" strokeWidth={2.5} dot={{ r: 3.5, fill: '#10b981', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 5 }} />
