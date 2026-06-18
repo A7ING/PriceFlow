@@ -183,20 +183,24 @@ async def get_product_data(url: str):
                 async with async_playwright() as p:
                     browser = await p.chromium.launch(
                         headless=True,
-                        args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"]
+                        args=["--disable-blink-features=AutomationControlled", "--no-sandbox",
+                              "--disable-dev-shm-usage"]
                     )
-                    context = await browser.new_context(
-                        user_agent=USER_AGENT, locale="uk-UA", viewport={"width": 1920, "height": 1080}
-                    )
-                    page = await context.new_page()
-                    await stealth_async(page)
 
-                    await page.goto(clean_url, wait_until="domcontentloaded", timeout=25000)
-                    data = await _extract_product_info(page, domain)
+                    try:
+                        context = await browser.new_context(
+                            user_agent=USER_AGENT, locale="uk-UA", viewport={"width": 1920, "height": 1080}
+                        )
+                        page = await context.new_page()
+                        await stealth_async(page)
 
-                    await browser.close()
-                    print(f"[парсер] Успіх Playwright: {data['price']}")
-                    return data
+                        await page.goto(clean_url, wait_until="domcontentloaded", timeout=25000)
+                        data = await _extract_product_info(page, domain)
+                        print(f"[парсер] Успіх Playwright: {data['price']}")
+                        return data
+
+                    finally:
+                        await browser.close()
 
             except Exception as e:
                 print(f"[парсер] Playwright не впорався ({str(e)}). Запуск резервного обходу Camoufox")
