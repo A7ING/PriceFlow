@@ -188,7 +188,6 @@ async def get_product_data(url: str):
                             "--no-sandbox",
                             "--disable-dev-shm-usage",
                             "--disable-disk-cache",
-                            "--disk-cache-dir=/dev/null"
                         ]
                     )
 
