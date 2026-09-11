@@ -16,7 +16,7 @@ RUN echo $'server { \n\
         try_files $uri $uri/ /index.html; \n\
     } \n\
     location /api/ { \n\
-        proxy_pass http://api:8000/api/; \n\
+        proxy_pass http://price_backend:8000/api/; \n\
         proxy_set_header Host $host; \n\
         proxy_set_header X-Real-IP $remote_addr; \n\
     } \n\
