@@ -183,8 +183,13 @@ async def get_product_data(url: str):
                 async with async_playwright() as p:
                     browser = await p.chromium.launch(
                         headless=True,
-                        args=["--disable-blink-features=AutomationControlled", "--no-sandbox",
-                              "--disable-dev-shm-usage"]
+                        args=[
+                            "--disable-blink-features=AutomationControlled",
+                            "--no-sandbox",
+                            "--disable-dev-shm-usage",
+                            "--disable-disk-cache",
+                            "--disk-cache-dir=/dev/null"
+                        ]
                     )
 
                     try:

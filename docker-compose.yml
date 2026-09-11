@@ -21,16 +21,38 @@ services:
     ports:
       - "6379:6379"
 
-  backend:
+  api:
     build: ./backend
-    container_name: price_backend
+    container_name: price_api
     init: true
     restart: always
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2
     ports:
       - "8000:8000"
     depends_on:
       - db
       - redis
+
+  parser_worker:
+    build: ./backend
+    container_name: price_parser
+    init: true
+    restart: always
+    # ВАЖНО: Раскомментируй нужную команду в зависимости от того, как ты запускаешь задачи:
+    # Вариант А (если используешь Celery в tasks.py):
+    # command: celery -A services.tasks worker --loglevel=info
+    # Вариант Б (если у тебя кастомный скрипт/цикл в parser.py):
+    # command: python -m services.parser
+    depends_on:
+      - db
+      - redis
+    tmpfs:
+      - /tmp   # Защищает диск сервера от мусора браузеров Playwright
+    deploy:
+      resources:
+        limits:
+          cpus: '0.40'   # Ограничивает парсер, чтобы он не положил весь сервер
+          memory: 400M
 
   frontend:
     build: ./frontend
@@ -39,7 +61,7 @@ services:
     ports:
       - "80:80"
     depends_on:
-      - backend
+      - api   # Теперь фронтенд ждет запуска API, а не старого backend
 
 volumes:
   postgres_data:
