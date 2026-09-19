@@ -4,8 +4,8 @@ services:
     container_name: price_db
     restart: always
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: adminpassword
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASS}
       POSTGRES_DB: price_analytics
     ports:
       - "5432:5432"
@@ -32,6 +32,10 @@ services:
     tmpfs:
       - /tmp
       - /dev/shm
+    environment:
+      - TG_BOT_TOKEN=${TG_BOT_TOKEN}
+      - SENDER_EMAIL=${SENDER_EMAIL}
+      - SENDER_PASSWORD=${SENDER_PASSWORD}
     logging:
       driver: "json-file"
       options:

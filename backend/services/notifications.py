@@ -4,11 +4,11 @@ from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 import httpx
 
-TELEGRAM_BOT_TOKEN = "8640781340:AAFumIcgm9AKgqFahY9OIWAxjlyqs5ubKI8"
+TELEGRAM_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 465
-SENDER_EMAIL = "priceflow.alerts@gmail.com"
-SENDER_PASSWORD = "duauqdukdiqmkibd"
+SENDER_EMAIL = os.getenv("SENDER_EMAIL")
+SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
 
 
 async def send_telegram_message(chat_id: str, text: str, image_url: str = None):

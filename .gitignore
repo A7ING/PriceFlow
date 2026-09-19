@@ -31,3 +31,4 @@ __pycache__/
 .env
 backend/test_price_change.py
 test_price_change.py
+.env
