@@ -39,6 +39,7 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+
 def clean_price(raw_price) -> float:
     if raw_price is None: return 0.0
     if isinstance(raw_price, (int, float)): return float(raw_price)
@@ -48,6 +49,7 @@ def clean_price(raw_price) -> float:
         return float(clean_str) if clean_str else 0.0
     except:
         return 0.0
+
 
 async def extract_price_from_dom(page):
     possible_containers = ["main", ".product", ".product-page", ".product-main", ".product-card", "#content", "body"]
@@ -63,6 +65,7 @@ async def extract_price_from_dom(page):
         except:
             continue
     return None
+
 
 async def _extract_product_info(page, domain):
     wait_selector = "h1"
@@ -141,11 +144,21 @@ async def _extract_product_info(page, domain):
         product_name = "Unknown Product"
 
     product_image = None
-    img_selectors = ['meta[property="og:image"]', 'img#globalImage', "img.product-image", 'link[rel="image_src"]']
+    img_selectors = [
+        'meta[property="og:image"]',
+        'link[rel="image_src"]',
+        '[data-qaid="image_link"] img',
+        '.gallery__image',
+        'img[itemprop="image"]',
+        'img.product-image',
+        'img#globalImage'
+    ]
+
     for img_sel in img_selectors:
         try:
             img_el = await page.query_selector(img_sel)
             if not img_el: continue
+
             tag_name = await img_el.evaluate("el => el.tagName.toLowerCase()")
             if tag_name == "meta":
                 product_image = await img_el.get_attribute("content")
@@ -153,14 +166,26 @@ async def _extract_product_info(page, domain):
                 product_image = await img_el.get_attribute("href")
             else:
                 product_image = await img_el.get_attribute("src")
+                if not product_image or product_image.startswith("data:image"):
+                    product_image = await img_el.get_attribute("data-src")
 
             if product_image:
+                product_image = product_image.strip()
+
                 if product_image.startswith("//"):
                     product_image = "https:" + product_image
                 elif product_image.startswith("/"):
                     product_image = f"https://{domain}{product_image}"
+                elif not product_image.startswith("http"):
+                    product_image = f"https://{domain}/{product_image}"
+
                 product_image = quote(product_image, safe=":/%?=&")
-                if product_image.startswith("http"): break
+
+                if ".webp" in product_image.lower():
+                    product_image = product_image.replace(".webp", ".jpg").replace(".WEBP", ".jpg")
+
+                if product_image.startswith("http"):
+                    break
         except:
             continue
 
@@ -169,6 +194,7 @@ async def _extract_product_info(page, domain):
         raise ValueError("Price not found (possibly CAPTCHA or anti-bot protection)")
 
     return {"name": product_name.strip(), "price": final_price, "image_url": product_image}
+
 
 async def get_product_data(url: str):
     domain = urlparse(url).netloc.replace("www.", "")
@@ -212,9 +238,9 @@ async def get_product_data(url: str):
         try:
             print(f"[парсер] Спроба 2 (Camoufox): {domain}")
             async with AsyncCamoufox(
-                headless=True,
-                os=["macos"],
-                screen=Screen(max_width=1920, max_height=1080)
+                    headless=True,
+                    os=["macos"],
+                    screen=Screen(max_width=1920, max_height=1080)
             ) as browser:
                 page = await browser.new_page()
                 await page.goto(clean_url, wait_until="domcontentloaded", timeout=35000)

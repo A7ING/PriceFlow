@@ -27,11 +27,19 @@ async def send_telegram_message(chat_id: str, text: str, image_url: str = None):
                     "caption": text,
                     "parse_mode": "HTML",
                 }
+                response = await client.post(url, data=payload)
+
+                if response.status_code == 400 and "failed to get HTTP URL content" in response.text:
+                    print(f"[телеграм] Не вдалося завантажити фото, відправляємо як текст.")
+                    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+                    response = await client.post(url, data=payload)
+
             else:
                 url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                 payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+                response = await client.post(url, data=payload)
 
-            response = await client.post(url, data=payload)
             if response.status_code == 200:
                 print(f"[телеграм] Повідомлення відправлено на {chat_id}")
                 return True
@@ -39,9 +47,8 @@ async def send_telegram_message(chat_id: str, text: str, image_url: str = None):
                 print(f"[телеграм] Помилка API: {response.text}")
                 return False
         except Exception as e:
-            print(f"[телеграм] Помилка: {str(e)}")
+            print(f"[телеграм] Критична помилка: {e}")
             return False
-
 
 async def send_email_message(to_email: str, subject: str, html_content: str, image_url: str = None):
     if not to_email or "@" not in to_email:

@@ -82,11 +82,8 @@ export default function ProductsTab({ products, url, setUrl, loading, handleAdd,
           {products.map((p, index) => (
             <div key={index} className="bg-white dark:bg-slate-900 p-5 md:p-6 rounded-xl md:rounded-2xl shadow border border-slate-100 dark:border-slate-800 transition-colors duration-300 flex flex-col">
 
-              {/*Блок з картинкою тепер є клікабельним посиланням на магазин*/}
-              <a
-                href={p.url}
-                target="_blank"
-                rel="noopener noreferrer"
+              <div
+                onClick={() => window.open(p.url, '_blank')}
                 title="Відкрити сторінку товару"
                 className="h-40 md:h-44 w-full mb-5 md:mb-6 rounded-lg bg-white p-2 border border-slate-100 dark:border-slate-800 flex items-center justify-center transition-colors relative hover:border-emerald-400 dark:hover:border-emerald-600 block cursor-pointer group"
               >
@@ -105,7 +102,7 @@ export default function ProductsTab({ products, url, setUrl, loading, handleAdd,
                 ) : (
                   <DefaultProductIcon />
                 )}
-              </a>
+              </div>
 
               <h3 className="text-sm md:text-[15px] font-semibold text-slate-900 dark:text-white line-clamp-2 mb-3 md:mb-4 h-[40px] md:h-[44px] transition-colors" title={p.name}>{p.name}</h3>
               <div className="flex items-end justify-between gap-4">
@@ -126,7 +123,6 @@ export default function ProductsTab({ products, url, setUrl, loading, handleAdd,
                 <div className="h-28 w-full mt-5 mb-1 animate-in fade-in slide-in-from-top-4 duration-300">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={p.history}>
-                      {/* Додано вісь X для дати та змінено форматування*/}
                       <XAxis dataKey="checked_at" hide />
                       <YAxis domain={['dataMin', 'dataMax']} hide />
                       <RechartsTooltip
