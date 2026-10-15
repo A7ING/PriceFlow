@@ -18,6 +18,8 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+CHALLENGE_TITLES = ("just a moment", "attention required")
+
 
 def log(message: str) -> None:
     print(message, flush=True)
@@ -52,6 +54,22 @@ async def extract_price_from_dom(page):
         except Exception:
             continue
     return None
+
+
+async def _page_ready(page, store) -> bool:
+    """Сторінка вже показала товар (а не капчу/заглушку), чекати далі немає сенсу."""
+    try:
+        title = ((await page.title()) or "").lower()
+        if any(t in title for t in CHALLENGE_TITLES):
+            return False
+        if store:
+            for sel in STORE_SELECTORS[store]["price"]:
+                if await page.query_selector(sel):
+                    return True
+            return False
+        return (await page.query_selector('meta[property="og:title"]')) is not None
+    except Exception:
+        return False
 
 
 async def _extract_product_info(page, host: str, store):
@@ -108,6 +126,7 @@ async def _extract_product_info(page, host: str, store):
     meta_og = re.search(r'property="og:title" content="([^"]+)"', content)
     if meta_og:
         title = html.unescape(meta_og.group(1))
+        # відрізаємо « | Магазин» та « - купити в ...», але не дефіс усередині назви (CT-S300)
         product_name = re.split(r"\s*\|\s*|\s+[\-–—]\s+", title, maxsplit=1)[0].strip()
 
     if not product_name and selectors:
@@ -188,12 +207,17 @@ async def _extract_product_info(page, host: str, store):
 
     final_price = clean_price(raw_price)
     if final_price == 0:
-        raise ValueError("Price not found (possibly CAPTCHA or anti-bot protection)")
+        try:
+            page_title = ((await page.title()) or "")[:80]
+        except Exception:
+            page_title = "?"
+        raise ValueError(f"Price not found | title={page_title!r} | url={page.url[:120]}")
 
     return {"name": product_name.strip(), "price": final_price, "image_url": product_image}
 
 
 async def run_parsers(clean_url: str, host: str, store, on_result):
+    """on_result(data) викликається одразу після успішного витягування даних."""
     result = None
 
     if not is_heavy_guard(host):
@@ -237,24 +261,30 @@ async def run_parsers(clean_url: str, host: str, store, on_result):
             screen=Screen(max_width=1920, max_height=1080),
         ) as browser:
             page = await browser.new_page()
-            await page.goto(clean_url, wait_until="domcontentloaded", timeout=35000)
+            await page.goto(clean_url, wait_until="domcontentloaded", timeout=45000)
 
             clicked = False
             for _ in range(15):
                 await asyncio.sleep(1)
-                for frame in page.frames:
-                    if frame.url.startswith("https://challenges.cloudflare.com"):
-                        try:
-                            frame_element = await frame.frame_element()
-                            bounding_box = await frame_element.bounding_box()
-                            if bounding_box:
-                                checkbox_x = bounding_box["x"] + bounding_box["width"] / 9
-                                checkbox_y = bounding_box["y"] + bounding_box["height"] / 2
-                                await page.mouse.click(x=checkbox_x, y=checkbox_y)
-                                log("[парсер] Зроблено фізичний клік по капчі")
-                                clicked = True
-                        except Exception:
-                            pass
+                challenge_frames = [
+                    f for f in page.frames if f.url.startswith("https://challenges.cloudflare.com")
+                ]
+                if not challenge_frames:
+                    if await _page_ready(page, store):
+                        break
+                    continue
+                for frame in challenge_frames:
+                    try:
+                        frame_element = await frame.frame_element()
+                        bounding_box = await frame_element.bounding_box()
+                        if bounding_box:
+                            checkbox_x = bounding_box["x"] + bounding_box["width"] / 9
+                            checkbox_y = bounding_box["y"] + bounding_box["height"] / 2
+                            await page.mouse.click(x=checkbox_x, y=checkbox_y)
+                            log("[парсер] Зроблено фізичний клік по капчі")
+                            clicked = True
+                    except Exception:
+                        pass
                 if clicked:
                     await asyncio.sleep(4)
                     break
@@ -280,14 +310,26 @@ async def main():
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
         os.replace(tmp_path, out_path)
+
+    task = asyncio.ensure_future(
+        run_parsers(clean_url, host, store, lambda data: write({"ok": True, "data": data}))
+    )
     try:
-        await run_parsers(clean_url, host, store, lambda data: write({"ok": True, "data": data}))
+        while not task.done():
+            await asyncio.wait({task}, timeout=0.5)
+            if os.path.exists(out_path):
+                await asyncio.wait({task}, timeout=10)
+                break
+        if task.done() and not task.cancelled() and task.exception() is not None:
+            if not os.path.exists(out_path):
+                write({"ok": False, "error": str(task.exception())[:300]})
     except Exception as e:
         if not os.path.exists(out_path):
             write({"ok": False, "error": str(e)[:300]})
 
     sys.stdout.flush()
     os._exit(0)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

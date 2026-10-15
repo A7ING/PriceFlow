@@ -11,8 +11,9 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from services.stores import match_store
 
-PARSE_TIMEOUT = 55.0
-INTERACTIVE_QUEUE_TIMEOUT = 40.0
+PARSE_TIMEOUT_INTERACTIVE = 100.0
+PARSE_TIMEOUT_BACKGROUND = 120.0
+INTERACTIVE_QUEUE_TIMEOUT = 45.0
 WORKER_MODULE = "services.parser_worker"
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -88,14 +89,41 @@ async def _ensure_public_host(host: str) -> None:
 
 
 def _kill_group(proc) -> None:
-    """Вбиває воркер і всі його дочірні процеси (браузери)."""
+    """Вбиває воркер і його групу процесів."""
     try:
         if hasattr(os, "killpg"):
             os.killpg(proc.pid, signal.SIGKILL)
-        else:
+        else:  # Windows (локальна розробка)
             proc.kill()
     except (ProcessLookupError, PermissionError, OSError):
         pass
+
+
+def _kill_leftovers(tmp_dir: str) -> None:
+    """Playwright запускає браузер у власній групі процесів, тому killpg воркера його не чіпає.
+    Знаходимо всі процеси цього парсингу за tmp_dir (в аргументах або змінній TMPDIR) і вбиваємо."""
+    if not os.path.isdir("/proc"):
+        return
+    marker = tmp_dir.encode()
+    env_entry = b"TMPDIR=" + marker
+    me = os.getpid()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) == me:
+            continue
+        pid = int(entry)
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                matched = marker in f.read()
+            if not matched:
+                with open(f"/proc/{pid}/environ", "rb") as f:
+                    matched = env_entry in f.read().split(b"\0")
+        except OSError:
+            continue
+        if matched:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
 
 
 def _read_result(path: str):
@@ -106,38 +134,45 @@ def _read_result(path: str):
         return None
 
 
-async def _run_worker(clean_url: str, host: str) -> dict:
+def _print_worker_log(path: str) -> None:
+    try:
+        with open(path, "rb") as f:
+            text = f.read()[-4000:].decode("utf-8", errors="replace").strip()
+        if text:
+            print(text, flush=True)
+    except OSError:
+        pass
+
+
+async def _run_worker(clean_url: str, host: str, timeout: float) -> dict:
     tmp_dir = tempfile.mkdtemp(prefix="pf_parse_")
     result_path = os.path.join(tmp_dir, "result.json")
+    log_path = os.path.join(tmp_dir, "worker.log")
     proc = None
-    collector = None
+    timed_out = False
     try:
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", WORKER_MODULE, clean_url, host, result_path,
-            cwd=BACKEND_DIR,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env={**os.environ, "TMPDIR": tmp_dir},
-            start_new_session=True,
-        )
+        with open(log_path, "wb") as log_file:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", WORKER_MODULE, clean_url, host, result_path,
+                cwd=BACKEND_DIR,
+                stdout=log_file,
+                stderr=asyncio.subprocess.STDOUT,
+                env={**os.environ, "TMPDIR": tmp_dir},
+                start_new_session=True,
+            )
 
-        async def _collect() -> bytes:
-            out = await proc.stdout.read()
-            await proc.wait()
-            return out
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            timed_out = True
 
-        collector = asyncio.ensure_future(_collect())
-        done, _ = await asyncio.wait({collector}, timeout=PARSE_TIMEOUT)
-        timed_out = not done
+
+        _kill_group(proc)
+        _kill_leftovers(tmp_dir)
+
+        _print_worker_log(log_path)
         if timed_out:
-            print(f"[парсер ERROR] Таймаут {PARSE_TIMEOUT:.0f}с, вбиваю процес парсера для {host}", flush=True)
-            _kill_group(proc)
-            await asyncio.wait({collector}, timeout=5)
-
-        if collector.done() and not collector.cancelled() and collector.exception() is None:
-            text = collector.result().decode("utf-8", errors="replace").strip()
-            if text:
-                print(text[-4000:], flush=True)
+            print(f"[парсер ERROR] Таймаут {timeout:.0f}с, процес парсера вбито для {host}", flush=True)
 
         result = _read_result(result_path)
         if result is None:
@@ -147,10 +182,9 @@ async def _run_worker(clean_url: str, host: str) -> dict:
             raise ValueError(MSG_FAILED)
         return result["data"]
     finally:
-        if collector is not None and not collector.done():
-            collector.cancel()
         if proc is not None:
             _kill_group(proc)
+            _kill_leftovers(tmp_dir)
             if proc.returncode is None:
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=5)
@@ -183,7 +217,8 @@ async def get_product_data(url: str, *, background: bool = False) -> dict:
                 print(f"[парсер] Черга зайнята більше {INTERACTIVE_QUEUE_TIMEOUT:.0f}с, відмова для {host}", flush=True)
                 raise ValueError(MSG_BUSY) from None
         acquired = True
-        return await _run_worker(clean_url, host)
+        timeout = PARSE_TIMEOUT_BACKGROUND if background else PARSE_TIMEOUT_INTERACTIVE
+        return await _run_worker(clean_url, host, timeout)
     finally:
         if acquired:
             _parse_slot.release()
