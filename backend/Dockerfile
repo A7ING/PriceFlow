@@ -13,5 +13,8 @@ RUN playwright install chromium --with-deps
 RUN playwright install-deps firefox
 RUN python -m camoufox fetch
 
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
 COPY . .
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

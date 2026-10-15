@@ -1,8 +1,11 @@
+import html
 from urllib.parse import urlparse
+
 from db.database import SessionLocal
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from models import models
+from models.check_state import ProductCheckState, mark_checked
 from schemas import schemas
 from services.auth import (
     create_access_token,
@@ -10,11 +13,20 @@ from services.auth import (
     get_password_hash,
     verify_password,
 )
-from services.notifications import send_email_message, send_telegram_message
-from services.parser import get_product_data
+from services.notifications import (
+    build_price_alert,
+    format_price,
+    send_alert,
+    send_email_message,
+    send_telegram_message,
+)
+from services.parser import get_product_data, normalize_url
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 router = APIRouter()
+
+MSG_GENERIC_PARSE_ERROR = "Не вдалося отримати дані зі сторінки. Спробуйте пізніше."
 
 
 def get_db():
@@ -66,43 +78,60 @@ async def track_product(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    existing_product = (
-        db.query(models.Product)
-        .filter(
-            models.Product.url == item.url, models.Product.user_id == current_user.id
-        )
-        .first()
-    )
+    user_id = current_user.id
+    raw_url = str(item.url)
 
-    if existing_product:
+    try:
+        clean_url, _host = normalize_url(raw_url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    url_variants = list({raw_url, clean_url})
+
+    def already_tracked() -> bool:
+        return (
+            db.query(models.Product.id)
+            .filter(models.Product.user_id == user_id, models.Product.url.in_(url_variants))
+            .first()
+            is not None
+        )
+
+    if already_tracked():
         raise HTTPException(
             status_code=400, detail="This product is already being tracked"
         )
 
+    db.rollback()
+
     try:
-        parsed_data = await get_product_data(item.url)
-
-        new_product = models.Product(
-            name=parsed_data["name"],
-            url=item.url,
-            current_price=parsed_data["price"],
-            image_url=parsed_data["image_url"],
-            user_id=current_user.id,
-        )
-        db.add(new_product)
-        db.commit()
-        db.refresh(new_product)
-
-        history_record = models.PriceHistory(
-            product_id=new_product.id, price=parsed_data["price"]
-        )
-        db.add(history_record)
-        db.commit()
-
-        return {"status": "success", "product_id": new_product.id}
-
-    except Exception as e:
+        parsed_data = await get_product_data(clean_url)
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"[routes] /track помилка: {e!r}", flush=True)
+        raise HTTPException(status_code=400, detail=MSG_GENERIC_PARSE_ERROR)
+
+    if already_tracked():
+        raise HTTPException(
+            status_code=400, detail="This product is already being tracked"
+        )
+
+    new_product = models.Product(
+        name=parsed_data["name"],
+        url=clean_url,
+        current_price=parsed_data["price"],
+        image_url=parsed_data["image_url"],
+        user_id=user_id,
+    )
+    db.add(new_product)
+    db.flush()
+    product_id = new_product.id
+
+    db.add(models.PriceHistory(product_id=product_id, price=parsed_data["price"]))
+    mark_checked(db, product_id)
+    db.commit()
+
+    return {"status": "success", "product_id": product_id}
 
 
 @router.get("/products", response_model=list[schemas.ProductResponse])
@@ -135,6 +164,9 @@ async def delete_product(
     db.query(models.PriceHistory).filter(
         models.PriceHistory.product_id == product_id
     ).delete()
+    db.query(ProductCheckState).filter(
+        ProductCheckState.product_id == product_id
+    ).delete()
     db.delete(product)
     db.commit()
 
@@ -147,73 +179,64 @@ async def force_update_product(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    product = (
-        db.query(models.Product)
-        .filter(
-            models.Product.id == product_id, models.Product.user_id == current_user.id
-        )
-        .first()
-    )
+    user_id = current_user.id
 
+    def load_product():
+        return (
+            db.query(models.Product)
+            .filter(models.Product.id == product_id, models.Product.user_id == user_id)
+            .first()
+        )
+
+    product = load_product()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    url = product.url
+    db.rollback()
+
     try:
-        parsed_data = await get_product_data(product.url)
-        new_price = parsed_data["price"]
-        old_price = product.current_price
-
-        if new_price != old_price:
-            product.current_price = new_price
-            history_record = models.PriceHistory(product_id=product.id, price=new_price)
-            db.add(history_record)
-            db.commit()
-
-            settings = (
-                db.query(models.SystemSettings)
-                .filter(models.SystemSettings.user_id == current_user.id)
-                .first()
-            )
-
-            if settings and settings.contact_info:
-                message = None
-
-                if old_price and new_price < old_price and settings.notify_drop:
-                    discount = old_price - new_price
-                    message = (
-                        f"<b>PRICE DROP ALERT!</b>\n\n"
-                        f"<b>{product.name}</b>\n"
-                        f"Old price: <s>{old_price} UAH</s>\n"
-                        f"New price: <b>{new_price} UAH</b>\n"
-                        f"Discount: <b>{discount} UAH</b>\n\n"
-                        f"<a href='{product.url}'><b>View Product</b></a>"
-                    )
-
-                elif old_price and new_price > old_price and settings.notify_rise:
-                    message = (
-                        f"<b>PRICE INCREASE ALERT!</b>\n\n"
-                        f"<b>{product.name}</b>\n"
-                        f"Old price: <s>{old_price} UAH</s>\n"
-                        f"New price: <b>{new_price} UAH</b>\n\n"
-                        f"<a href='{product.url}'><b>View Product</b></a>"
-                    )
-
-                if message:
-                    if settings.notify_method == "telegram":
-                        await send_telegram_message(
-                            settings.contact_info, message, product.image_url
-                        )
-                    elif settings.notify_method == "email":
-                        await send_email_message(
-                            settings.contact_info, "PriceFlow Alert!", message, product.image_url
-                        )
-
-            return {"status": "success", "message": f"Price updated: {new_price} UAH"}
-        else:
-            return {"status": "success", "message": "Price has not changed"}
-
-    except Exception as e:
+        parsed_data = await get_product_data(url)
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"[routes] force-update помилка: {e!r}", flush=True)
+        raise HTTPException(status_code=400, detail=MSG_GENERIC_PARSE_ERROR)
+
+    product = load_product()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    new_price = parsed_data["price"]
+    old_price = product.current_price
+    changed = new_price != old_price
+
+    if not product.image_url and parsed_data.get("image_url"):
+        product.image_url = parsed_data["image_url"]
+
+    alert = None
+    if changed:
+        product.current_price = new_price
+        db.add(models.PriceHistory(product_id=product.id, price=new_price))
+
+        settings = (
+            db.query(models.SystemSettings)
+            .filter(models.SystemSettings.user_id == user_id)
+            .first()
+        )
+        alert = build_price_alert(
+            settings, product.name, product.url, product.image_url, old_price, new_price
+        )
+
+    mark_checked(db, product.id)
+    db.commit()
+
+    if alert:
+        await send_alert(alert)
+
+    if changed:
+        return {"status": "success", "message": f"Price updated: {format_price(new_price)} UAH"}
+    return {"status": "success", "message": "Price has not changed"}
 
 
 @router.get("/settings", response_model=schemas.SettingsResponse)
@@ -239,13 +262,14 @@ async def update_settings(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    user_id = current_user.id
     settings = (
         db.query(models.SystemSettings)
-        .filter(models.SystemSettings.user_id == current_user.id)
+        .filter(models.SystemSettings.user_id == user_id)
         .first()
     )
     if not settings:
-        settings = models.SystemSettings(user_id=current_user.id)
+        settings = models.SystemSettings(user_id=user_id)
         db.add(settings)
 
     settings.update_freq = new_settings.update_freq
@@ -259,7 +283,7 @@ async def update_settings(
     if new_settings.contact_info:
         products = (
             db.query(models.Product)
-            .filter(models.Product.user_id == current_user.id)
+            .filter(models.Product.user_id == user_id)
             .all()
         )
         products_count = len(products)
@@ -274,16 +298,18 @@ async def update_settings(
 
         message = (
             f"<b>PriceFlow Alerts Enabled!</b>\n\n"
-            f"<b>Check Frequency:</b> {new_settings.update_freq}\n"
+            f"<b>Check Frequency:</b> {html.escape(str(new_settings.update_freq))}\n"
             f"<b>Alert Conditions:</b> {conditions_text}\n\n"
             f"<b>Currently tracking ({products_count} items):</b>\n"
         )
 
         for p in products:
-            message += f"- {p.name} (<b>{p.current_price} UAH</b>)\n"
+            message += f"- {html.escape(p.name or '')} (<b>{format_price(p.current_price)} UAH</b>)\n"
+
+        image_url = products[-1].image_url if products else None
+        db.rollback()
 
         if new_settings.notify_method == "telegram":
-            image_url = products[-1].image_url if products else None
             await send_telegram_message(new_settings.contact_info, message, image_url)
 
         elif new_settings.notify_method == "email":
@@ -302,16 +328,26 @@ async def get_analytics_data(
     )
     product_ids = [p.id for p in products]
 
-    histories = (
-        db.query(models.PriceHistory)
-        .filter(models.PriceHistory.product_id.in_(product_ids))
-        .order_by(models.PriceHistory.checked_at.desc())
-        .all()
-    )
+    if product_ids:
+        checks_performed = (
+            db.query(func.count(models.PriceHistory.id))
+            .filter(models.PriceHistory.product_id.in_(product_ids))
+            .scalar()
+            or 0
+        )
+        recent_histories = (
+            db.query(models.PriceHistory)
+            .filter(models.PriceHistory.product_id.in_(product_ids))
+            .order_by(models.PriceHistory.checked_at.desc())
+            .limit(8)
+            .all()
+        )
+    else:
+        checks_performed = 0
+        recent_histories = []
 
     total_value = sum(p.current_price for p in products if p.current_price)
     active_items = len(products)
-    checks_performed = len(histories)
 
     colors = [
         "#00a046",
@@ -347,7 +383,7 @@ async def get_analytics_data(
     ]
 
     activity_logs = []
-    for h in histories[:8]:
+    for h in recent_histories:
         prod = next((p for p in products if p.id == h.product_id), None)
         prod_name = (
             prod.name[:45] + "..."
@@ -355,14 +391,13 @@ async def get_analytics_data(
             else (prod.name if prod else "Unknown")
         )
 
-        is_first = (
-            db.query(models.PriceHistory)
+        first_record = (
+            db.query(models.PriceHistory.id)
             .filter(models.PriceHistory.product_id == h.product_id)
             .order_by(models.PriceHistory.checked_at.asc())
             .first()
-            .id
-            == h.id
         )
+        is_first = bool(first_record) and first_record[0] == h.id
 
         activity_logs.append(
             {

@@ -1,280 +1,191 @@
 import asyncio
-import re
-from urllib.parse import quote, urlparse
+import ipaddress
+import json
+import os
+import shutil
+import signal
+import socket
+import sys
+import tempfile
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
-from camoufox.async_api import AsyncCamoufox
-from browserforge.fingerprints import Screen
+from services.stores import match_store
 
-MAX_CONCURRENT_PARSERS = asyncio.Semaphore(1)
+PARSE_TIMEOUT = 55.0
+INTERACTIVE_QUEUE_TIMEOUT = 40.0
+WORKER_MODULE = "services.parser_worker"
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-STORE_SELECTORS = {
-    "rozetka.com.ua": {
-        "name": ["h1.product__title", "h1.qa-product-title", ".product__header h1"],
-        "price": ["p.product-prices__big", ".product-price__big", ".product-prices__main"],
-    },
-    "prom.ua": {
-        "name": ["[data-qaid='product_name']", "h1", ".x-product-info__name"],
-        "price": ["[data-qaid='product_price']", ".cabinet-price", "[data-testid='price']", ".x-product-info__price"],
-    },
-    "allo.ua": {
-        "name": ["h1.p-view__header-title", "h1"],
-        "price": [".a-product-price__current-price", ".v-pb__cur", ".p-trade__price-new .sum", "[data-price-amount]"],
-    },
-    "housebrand.com": {
-        "name": ["h1[data-testid='product-name']", ".product-name", "h1", "h2"],
-        "price": ["div[data-selen='product-price']", ".price-promo", ".price-standard"],
-    },
-}
-
-HEAVY_GUARD_SITES = [
-    "rozetka.com.ua",
-    "allo.ua"
-]
-
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
+MSG_BAD_URL = "Некоректне посилання. Вставте повну адресу сторінки товару (https://...)."
+MSG_GOOGLE = (
+    "Це рекламне або службове посилання Google. Відкрийте сторінку товару в самому магазині "
+    "та скопіюйте адресу з рядка браузера."
 )
+MSG_PRIVATE = "Це посилання недоступне для відстеження."
+MSG_DNS = "Не вдалося знайти сайт за цим посиланням. Перевірте адресу."
+MSG_BUSY = "Сервер зараз перевіряє інші товари. Спробуйте за хвилину."
+MSG_TIMEOUT = "Сайт завис або увімкнув захист. Спробуйте пізніше."
+MSG_FAILED = "Не вдалося отримати ціну зі сторінки (можливо, сайт показав капчу або захист від ботів)."
+MSG_CRASH = "Парсер аварійно завершився. Спробуйте ще раз пізніше."
+
+TRACKING_PARAMS = {
+    "gclid", "gbraid", "wbraid", "dclid", "fbclid", "yclid", "msclkid",
+    "_ga", "_gl", "mc_cid", "mc_eid",
+}
+AD_HOSTS = ("googleadservices.com", "doubleclick.net", "googlesyndication.com")
+
+_parse_slot = asyncio.Semaphore(1)
+_interactive_active = 0
 
 
-def clean_price(raw_price) -> float:
-    if raw_price is None: return 0.0
-    if isinstance(raw_price, (int, float)): return float(raw_price)
+def normalize_url(url: str) -> tuple[str, str]:
+    """Повертає (очищений_url, host_без_www). Кидає ValueError з текстом для користувача."""
     try:
-        text = str(raw_price).replace("\xa0", "").replace(" ", "").replace(",", ".")
-        clean_str = re.sub(r"[^\d.]", "", text)
-        return float(clean_str) if clean_str else 0.0
-    except:
-        return 0.0
+        parsed = urlparse((url or "").strip())
+        host = (parsed.hostname or "").lower().removeprefix("www.")
+    except ValueError:
+        raise ValueError(MSG_BAD_URL) from None
+
+    if parsed.scheme not in ("http", "https") or not host:
+        raise ValueError(MSG_BAD_URL)
+
+    if host == "google.com" or host.startswith("google.") or any(
+        host == h or host.endswith("." + h) for h in AD_HOSTS
+    ):
+        raise ValueError(MSG_GOOGLE)
+
+    if match_store(host):
+        query = ""
+    else:
+        query = urlencode(
+            [
+                (k, v)
+                for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+                if not k.lower().startswith("utm_") and k.lower() not in TRACKING_PARAMS
+            ]
+        )
+
+    clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, query, ""))
+    return clean_url, host
 
 
-async def extract_price_from_dom(page):
-    possible_containers = ["main", ".product", ".product-page", ".product-main", ".product-card", "#content", "body"]
-    money_pattern = r"(\d[\d\s,.]*)\s?(?:₴|грн|UAH|€|\$|zł|PLN|Kč|CZK|£)"
-    for selector in possible_containers:
+async def _ensure_public_host(host: str) -> None:
+    """Захист від SSRF: не пускаємо браузер на localhost / приватні мережі / docker-сервіси."""
+    try:
+        infos = await asyncio.wait_for(
+            asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM), timeout=8
+        )
+    except (socket.gaierror, asyncio.TimeoutError, OSError):
+        raise ValueError(MSG_DNS) from None
+
+    for info in infos:
         try:
-            container = await page.query_selector(selector)
-            if not container: continue
-            text = await container.inner_text()
-            matches = re.findall(money_pattern, text, re.IGNORECASE)
-            valid_prices = [clean_price(m) for m in matches if 10 < clean_price(m) < 1000000]
-            if valid_prices: return max(valid_prices)
-        except:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        except ValueError:
             continue
-    return None
+        if not ip.is_global:
+            raise ValueError(MSG_PRIVATE)
 
 
-async def _extract_product_info(page, domain):
-    wait_selector = "h1"
-    wait_timeout = 8000
-
-    if domain in STORE_SELECTORS:
-        wait_selector = ", ".join(STORE_SELECTORS[domain]["price"])
-        wait_timeout = 12000
-
+def _kill_group(proc) -> None:
+    """Вбиває воркер і всі його дочірні процеси (браузери)."""
     try:
-        await page.wait_for_selector(wait_selector, timeout=wait_timeout)
-    except:
+        if hasattr(os, "killpg"):
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except (ProcessLookupError, PermissionError, OSError):
         pass
 
-    content = await page.content()
-    product_name = None
-    raw_price = None
 
-    if domain in STORE_SELECTORS:
-        for sel in STORE_SELECTORS[domain]["price"]:
+def _read_result(path: str):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+async def _run_worker(clean_url: str, host: str) -> dict:
+    tmp_dir = tempfile.mkdtemp(prefix="pf_parse_")
+    result_path = os.path.join(tmp_dir, "result.json")
+    proc = None
+    collector = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", WORKER_MODULE, clean_url, host, result_path,
+            cwd=BACKEND_DIR,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env={**os.environ, "TMPDIR": tmp_dir},
+            start_new_session=True,
+        )
+
+        async def _collect() -> bytes:
+            out = await proc.stdout.read()
+            await proc.wait()
+            return out
+
+        collector = asyncio.ensure_future(_collect())
+        done, _ = await asyncio.wait({collector}, timeout=PARSE_TIMEOUT)
+        timed_out = not done
+        if timed_out:
+            print(f"[парсер ERROR] Таймаут {PARSE_TIMEOUT:.0f}с, вбиваю процес парсера для {host}", flush=True)
+            _kill_group(proc)
+            await asyncio.wait({collector}, timeout=5)
+
+        if collector.done() and not collector.cancelled() and collector.exception() is None:
+            text = collector.result().decode("utf-8", errors="replace").strip()
+            if text:
+                print(text[-4000:], flush=True)
+
+        result = _read_result(result_path)
+        if result is None:
+            raise ValueError(MSG_TIMEOUT if timed_out else MSG_CRASH)
+        if not result.get("ok"):
+            print(f"[парсер ERROR] {host}: {result.get('error')}", flush=True)
+            raise ValueError(MSG_FAILED)
+        return result["data"]
+    finally:
+        if collector is not None and not collector.done():
+            collector.cancel()
+        if proc is not None:
+            _kill_group(proc)
+            if proc.returncode is None:
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+async def get_product_data(url: str, *, background: bool = False) -> dict:
+    """Повертає {"name", "price", "image_url"}. Помилки для користувача: ValueError.
+    background=True: виклик із планувальника. Він пропускає вперед запити користувачів.
+    """
+    global _interactive_active
+
+    clean_url, host = normalize_url(url)
+    await _ensure_public_host(host)
+
+    if not background:
+        _interactive_active += 1
+    acquired = False
+    try:
+        if background:
+            while _interactive_active > 0:
+                await asyncio.sleep(2)
+            await _parse_slot.acquire()
+        else:
             try:
-                el = await page.query_selector(sel)
-                if el:
-                    if domain == "prom.ua":
-                        attr = await el.get_attribute("data-qaprice")
-                        if attr:
-                            raw_price = attr
-                            break
-                    text = await el.inner_text()
-                    if text and text.strip():
-                        raw_price = text.strip()
-                        break
-            except:
-                continue
-
-    if not raw_price:
-        meta_price = re.search(r'property="(?:product|og):price:amount" content="([\d.]+)"', content)
-        if meta_price: raw_price = meta_price.group(1)
-
-    if not raw_price:
-        json_ld_price = re.search(r'"price":\s?"?([\d.]+)"?', content)
-        if json_ld_price: raw_price = json_ld_price.group(1)
-
-    if not raw_price:
-        raw_price = await extract_price_from_dom(page)
-
-    await asyncio.sleep(1)
-
-    meta_og = re.search(r'property="og:title" content="([^"]+)"', content)
-    if meta_og:
-        product_name = meta_og.group(1).split('|')[0].split('-')[0].strip()
-
-    if not product_name and domain in STORE_SELECTORS:
-        for sel in STORE_SELECTORS[domain]["name"]:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    text = await page.evaluate("(element) => element.innerText", el)
-                    if text and text.strip():
-                        product_name = text.strip()
-                        break
-            except:
-                continue
-
-    if not product_name:
-        try:
-            h1 = await page.query_selector("h1")
-            if h1:
-                text = await page.evaluate("(element) => element.innerText", h1)
-                if text and text.strip():
-                    product_name = text.strip()
-        except:
-            pass
-
-    if not product_name:
-        product_name = "Unknown Product"
-
-    product_image = None
-    img_selectors = [
-        'meta[property="og:image"]',
-        'link[rel="image_src"]',
-        '[data-qaid="image_link"] img',
-        '.gallery__image',
-        'img[itemprop="image"]',
-        'img.product-image',
-        'img#globalImage'
-    ]
-
-    for img_sel in img_selectors:
-        try:
-            img_el = await page.query_selector(img_sel)
-            if not img_el: continue
-
-            tag_name = await img_el.evaluate("el => el.tagName.toLowerCase()")
-            if tag_name == "meta":
-                product_image = await img_el.get_attribute("content")
-            elif tag_name == "link":
-                product_image = await img_el.get_attribute("href")
-            else:
-                product_image = await img_el.get_attribute("src")
-                if not product_image or product_image.startswith("data:image"):
-                    product_image = await img_el.get_attribute("data-src")
-
-            if product_image:
-                product_image = product_image.strip()
-
-                if product_image.startswith("//"):
-                    product_image = "https:" + product_image
-                elif product_image.startswith("/"):
-                    product_image = f"https://{domain}{product_image}"
-                elif not product_image.startswith("http"):
-                    product_image = f"https://{domain}/{product_image}"
-
-                product_image = quote(product_image, safe=":/%?=&")
-
-                if ".webp" in product_image.lower():
-                    product_image = product_image.replace(".webp", ".jpg").replace(".WEBP", ".jpg")
-
-                if product_image.startswith("http"):
-                    break
-        except:
-            continue
-
-    final_price = clean_price(raw_price)
-    if final_price == 0:
-        raise ValueError("Price not found (possibly CAPTCHA or anti-bot protection)")
-
-    return {"name": product_name.strip(), "price": final_price, "image_url": product_image}
-
-
-async def get_product_data(url: str):
-    domain = urlparse(url).netloc.replace("www.", "")
-    clean_url = url.split("?")[0]
-
-    async with MAX_CONCURRENT_PARSERS:
-        data = None
-
-        if domain not in HEAVY_GUARD_SITES:
-            try:
-                print(f"[парсер] Спроба 1 (Playwright): {domain}")
-                async with async_playwright() as p:
-                    browser = await p.chromium.launch(
-                        headless=True,
-                        args=[
-                            "--disable-blink-features=AutomationControlled",
-                            "--no-sandbox",
-                            "--disable-dev-shm-usage",
-                            "--disable-disk-cache",
-                        ]
-                    )
-
-                    try:
-                        context = await browser.new_context(
-                            user_agent=USER_AGENT, locale="uk-UA", viewport={"width": 1920, "height": 1080}
-                        )
-                        page = await context.new_page()
-                        await stealth_async(page)
-
-                        await page.goto(clean_url, wait_until="domcontentloaded", timeout=25000)
-                        data = await _extract_product_info(page, domain)
-                        print(f"[парсер] Успіх Playwright: {data['price']}")
-                        return data
-
-                    finally:
-                        await browser.close()
-
-            except Exception as e:
-                print(f"[парсер] Playwright не впорався ({str(e)}). Запуск резервного обходу Camoufox")
-
-        try:
-            print(f"[парсер] Спроба 2 (Camoufox): {domain}")
-            async with AsyncCamoufox(
-                    headless=True,
-                    os=["macos"],
-                    screen=Screen(max_width=1920, max_height=1080)
-            ) as browser:
-                page = await browser.new_page()
-                await page.goto(clean_url, wait_until="domcontentloaded", timeout=35000)
-
-                clicked = False
-                for _ in range(15):
-                    await asyncio.sleep(1)
-                    for frame in page.frames:
-                        if frame.url.startswith('https://challenges.cloudflare.com'):
-                            try:
-                                frame_element = await frame.frame_element()
-                                bounding_box = await frame_element.bounding_box()
-                                if bounding_box:
-                                    coord_x = bounding_box['x']
-                                    coord_y = bounding_box['y']
-                                    width = bounding_box['width']
-                                    height = bounding_box['height']
-
-                                    checkbox_x = coord_x + width / 9
-                                    checkbox_y = coord_y + height / 2
-
-                                    await page.mouse.click(x=checkbox_x, y=checkbox_y)
-                                    print("[парсер] Зроблено фізичний клік по капчі")
-                                    clicked = True
-                            except:
-                                pass
-                    if clicked:
-                        await asyncio.sleep(4)
-                        break
-
-                data = await _extract_product_info(page, domain)
-                print(f"[парсер] Успіх Camoufox: {data['price']}")
-                return data
-
-        except Exception as fallback_error:
-            print(f"[парсер ERROR] Не вдалося обійти захист {domain}: {str(fallback_error)}")
-            raise fallback_error
+                await asyncio.wait_for(_parse_slot.acquire(), timeout=INTERACTIVE_QUEUE_TIMEOUT)
+            except asyncio.TimeoutError:
+                print(f"[парсер] Черга зайнята більше {INTERACTIVE_QUEUE_TIMEOUT:.0f}с, відмова для {host}", flush=True)
+                raise ValueError(MSG_BUSY) from None
+        acquired = True
+        return await _run_worker(clean_url, host)
+    finally:
+        if acquired:
+            _parse_slot.release()
+        if not background:
+            _interactive_active -= 1
